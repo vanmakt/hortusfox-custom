@@ -124,7 +124,8 @@ class ApiController extends BaseController {
             header('Content-Type: application/json');
             exit(json([
                 'code' => 403,
-                'invalid_token' => $token
+                'invalid_token' => true,
+                'token_id' => $this->tokenFingerprint($token)
             ])->out(true));
         }
     }
