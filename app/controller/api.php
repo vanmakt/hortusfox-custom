@@ -6,24 +6,126 @@
  * Gateway to the workspace REST API
  */
 class ApiController extends BaseController {
+    private $apiToken = null;
+    private $apiTokenSource = 'none';
+
+    /**
+     * @param string|null $token
+     * @return string
+     */
+    private function tokenFingerprint($token)
+    {
+        if ((!$token) || (strlen($token) <= 0)) {
+            return 'none';
+        }
+
+        return substr(hash('sha256', $token), 0, 12);
+    }
+
+    /**
+     * @return array
+     */
+    private function resolveToken()
+    {
+        $auth = $_SERVER['HTTP_AUTHORIZATION'] ?? ($_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? null);
+        if (($auth) && (preg_match('/Bearer\\s+(.+)/i', $auth, $matches))) {
+            return [trim($matches[1]), 'bearer'];
+        }
+
+        if (isset($_POST['token'])) {
+            return [$_POST['token'], 'post'];
+        }
+
+        if (isset($_GET['token'])) {
+            return [$_GET['token'], 'query'];
+        }
+
+        return [null, 'none'];
+    }
+
+    /**
+     * @return void
+     */
+    private function assertHttpMethodPolicy()
+    {
+        $path = parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH);
+        $method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
+
+        $mutatingEndpoints = [
+            '/api/plants/add', '/api/plants/update', '/api/plants/remove',
+            '/api/plants/attributes/add', '/api/plants/attributes/edit', '/api/plants/attributes/remove',
+            '/api/plants/photo/update', '/api/plants/gallery/add', '/api/plants/gallery/edit', '/api/plants/gallery/remove',
+            '/api/plants/log/add', '/api/plants/log/edit', '/api/plants/log/remove',
+            '/api/tasks/add', '/api/tasks/edit', '/api/tasks/remove',
+            '/api/inventory/add', '/api/inventory/edit', '/api/inventory/amount/inc', '/api/inventory/amount/dec', '/api/inventory/remove',
+            '/api/calendar/add', '/api/calendar/edit', '/api/calendar/remove',
+            '/api/chat/message/add', '/api/backup/import'
+        ];
+
+        if ((in_array($path, $mutatingEndpoints)) && ($method === 'GET')) {
+            http_response_code(405);
+            header('Allow: POST');
+            header('Content-Type: application/json');
+            exit(json([
+                'code' => 405,
+                'msg' => 'Method not allowed for this endpoint'
+            ])->out(true));
+        }
+    }
+
+    /**
+     * @return void
+     */
+    private function setupApiRequestAudit()
+    {
+        $path = parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH);
+        $method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
+        $sourceIp = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+        $userAgent = substr($_SERVER['HTTP_USER_AGENT'] ?? '', 0, 180);
+        $tokenFingerprint = $this->tokenFingerprint($this->apiToken);
+        $tokenSource = $this->apiTokenSource;
+
+        register_shutdown_function(function () use ($path, $method, $sourceIp, $userAgent, $tokenFingerprint, $tokenSource) {
+            $status = http_response_code();
+            if ((!$status) || ($status < 100)) {
+                $status = 200;
+            }
+
+            error_log('[api-audit] ' . json_encode([
+                'status' => $status,
+                'method' => $method,
+                'endpoint' => $path,
+                'token_source' => $tokenSource,
+                'token_id' => $tokenFingerprint,
+                'ip' => $sourceIp,
+                'ua' => $userAgent
+            ]));
+        });
+    }
+
     public function __construct()
     {
-        $token = null;
-        
-        if (isset($_GET['token'])) {
-            $token = $_GET['token'];
-        } else if ((isset($_POST)) && (isset($_POST['token']))) {
-            $token = $_POST['token'];
-        }
+        list($token, $source) = $this->resolveToken();
+        $this->apiToken = $token;
+        $this->apiTokenSource = $source;
+
+        $this->assertHttpMethodPolicy();
 
         try {
             ApiModel::validateKey($token);
+
+            if ($source === 'query') {
+                header('X-Api-Token-Deprecated: query');
+            }
+
+            $this->setupApiRequestAudit();
         } catch (\Exception $e) {
             http_response_code(403);
             header('Content-Type: application/json');
             exit(json([
                 'code' => 403,
-                'invalid_token' => $token
+                'invalid_token' => true,
+                'token_id' => $this->tokenFingerprint($token)
             ])->out(true));
         }
     }
